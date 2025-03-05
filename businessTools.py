@@ -130,7 +130,7 @@ def sanitize_filename(filename):
 def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_offset):
     """
     Splits the input PDF into segments based on the party name.
-    The party name is extracted using the dynamic parameters.
+    Consecutive pages with the same party name are grouped together.
     """
     doc = fitz.open(pdf_path)
     num_pages = len(doc)
@@ -141,14 +141,21 @@ def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_off
     for page_num in range(num_pages):
         page = doc.load_page(page_num)
         text = page.get_text("text")
-        party = extract_party_name_dynamic(text, party_keyword, party_offset)
-        if party:
-            if current_party is not None:
+        extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
+        if extracted_party:
+            if current_party is None:
+                # Start a new grouping if none exists
+                current_party = extracted_party
+                current_start_page = page_num
+            elif extracted_party != current_party:
+                # Party has changed; finish the current group and start a new one.
                 splits.append((current_start_page, page_num - 1, current_party))
-            current_party = party
-            current_start_page = page_num
+                current_party = extracted_party
+                current_start_page = page_num
+            # If the extracted party equals current_party, continue grouping.
+        # If no party is found, assume the page is part of the current group (if any)
 
-    if current_party:
+    if current_party is not None:
         splits.append((current_start_page, num_pages - 1, current_party))
 
     for start_page, end_page, party in splits:
@@ -164,12 +171,11 @@ def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_off
     return f"Processed (Split by Party Name): {os.path.basename(pdf_path)}"
 
 
-def extract_pdf_by_order_id(
-    pdf_path, output_directory, party_keyword, party_offset, order_keyword, order_regex
-):
+def extract_pdf_by_order_id(pdf_path, output_directory, party_keyword, party_offset, order_keyword, order_regex):
     """
-    Splits the PDF into segments based on both the party name and order ID.
-    Uses dynamic parameters for both extractions.
+    Splits the PDF into segments based on both party name and order ID.
+    Consecutive pages with the same party and order ID are grouped together.
+    If a page does not contain extraction info, it is assumed to belong to the current group.
     """
     doc = fitz.open(pdf_path)
     num_pages = len(doc)
@@ -181,22 +187,33 @@ def extract_pdf_by_order_id(
     for page_num in range(num_pages):
         page = doc.load_page(page_num)
         text = page.get_text("text")
-        party = extract_party_name_dynamic(text, party_keyword, party_offset)
-        order_id = extract_order_id_dynamic(text, order_keyword, order_regex)
-        if party and order_id:
-            if current_party is not None:
-                splits.append(
-                    (current_start_page, page_num - 1, current_party, current_order_id)
-                )
-            current_party = party
-            current_order_id = order_id
-            current_start_page = page_num
+        extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
+        extracted_order_id = extract_order_id_dynamic(text, order_keyword, order_regex)
 
-    if current_party:
-        splits.append(
-            (current_start_page, num_pages - 1, current_party, current_order_id)
-        )
+        if extracted_party and extracted_order_id:
+            # If no group exists, start one.
+            if current_party is None:
+                current_party = extracted_party
+                current_order_id = extracted_order_id
+                current_start_page = page_num
+            # If either the party or order ID has changed, finish the current group.
+            elif extracted_party != current_party or extracted_order_id != current_order_id:
+                splits.append((current_start_page, page_num - 1, current_party, current_order_id))
+                current_party = extracted_party
+                current_order_id = extracted_order_id
+                current_start_page = page_num
+            # If both are the same, continue grouping.
+        else:
+            # If extraction fails on this page and a group has started, assume it belongs to the current group.
+            # Otherwise, skip the page.
+            if current_party is None:
+                continue
 
+    # Add the final group if one exists.
+    if current_party is not None:
+        splits.append((current_start_page, num_pages - 1, current_party, current_order_id))
+
+    # Save each group as a new PDF.
     for start_page, end_page, party, order_id in splits:
         new_pdf = fitz.open()
         for i in range(start_page, end_page + 1):
@@ -206,9 +223,9 @@ def extract_pdf_by_order_id(
         output_path = os.path.join(output_directory, output_filename)
         new_pdf.save(output_path)
         new_pdf.close()
+
     doc.close()
     return f"Processed (Extract by Order ID): {os.path.basename(pdf_path)}"
-
 
 def process_text_extraction(pdf_path, output_directory):
     """
