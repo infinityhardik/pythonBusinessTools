@@ -171,7 +171,9 @@ def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_off
     return f"Processed (Split by Party Name): {os.path.basename(pdf_path)}"
 
 
-def extract_pdf_by_order_id(pdf_path, output_directory, party_keyword, party_offset, order_keyword, order_regex):
+def extract_pdf_by_order_id(
+    pdf_path, output_directory, party_keyword, party_offset, order_keyword, order_regex
+):
     """
     Splits the PDF into segments based on both party name and order ID.
     Consecutive pages with the same party and order ID are grouped together.
@@ -197,8 +199,13 @@ def extract_pdf_by_order_id(pdf_path, output_directory, party_keyword, party_off
                 current_order_id = extracted_order_id
                 current_start_page = page_num
             # If either the party or order ID has changed, finish the current group.
-            elif extracted_party != current_party or extracted_order_id != current_order_id:
-                splits.append((current_start_page, page_num - 1, current_party, current_order_id))
+            elif (
+                extracted_party != current_party
+                or extracted_order_id != current_order_id
+            ):
+                splits.append(
+                    (current_start_page, page_num - 1, current_party, current_order_id)
+                )
                 current_party = extracted_party
                 current_order_id = extracted_order_id
                 current_start_page = page_num
@@ -211,7 +218,9 @@ def extract_pdf_by_order_id(pdf_path, output_directory, party_keyword, party_off
 
     # Add the final group if one exists.
     if current_party is not None:
-        splits.append((current_start_page, num_pages - 1, current_party, current_order_id))
+        splits.append(
+            (current_start_page, num_pages - 1, current_party, current_order_id)
+        )
 
     # Save each group as a new PDF.
     for start_page, end_page, party, order_id in splits:
@@ -226,6 +235,7 @@ def extract_pdf_by_order_id(pdf_path, output_directory, party_keyword, party_off
 
     doc.close()
     return f"Processed (Extract by Order ID): {os.path.basename(pdf_path)}"
+
 
 def process_text_extraction(pdf_path, output_directory):
     """
