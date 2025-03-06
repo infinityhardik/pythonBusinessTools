@@ -119,9 +119,10 @@ def extract_text_from_pdf(pdf_path):
 
 def sanitize_filename(filename):
     """
-    Removes invalid characters for Windows filenames.
+    Removes invalid characters for Windows filenames, including square brackets.
     """
-    return re.sub(r'[<>:"/\\|?*]', "", filename)
+    # The regex removes: < > : " / \ | ? * [ ]
+    return re.sub(r'[<>:"/\\|?*\[\]]+', "", filename)
 
 
 # ----------------------- PDF Processing Functions -----------------------
