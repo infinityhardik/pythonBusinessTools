@@ -163,7 +163,7 @@ def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_off
         new_pdf = fitz.open()
         for i in range(start_page, end_page + 1):
             new_pdf.insert_pdf(doc, from_page=i, to_page=i)
-        sanitized_party = sanitize_filename(party)
+        sanitized_party = sanitize_filename(party).strip()
         output_filename = f"{sanitized_party}.pdf"
         output_path = os.path.join(output_directory, output_filename)
         new_pdf.save(output_path)
