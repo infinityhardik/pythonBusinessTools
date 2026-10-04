@@ -1,5 +1,5 @@
 import os
-import fitz  # PyMuPDF
+import pymupdf
 import re
 from collections import defaultdict
 
@@ -24,7 +24,7 @@ def extract_party_name(text):
     return sanitize_filename(party_name).strip() if party_name else None
 
 def split_pdf_by_party_name(pdf_path):
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     num_pages = len(doc)
     
     current_party_name = None
@@ -51,10 +51,9 @@ def split_pdf_by_party_name(pdf_path):
 
 def save_split_pdfs(splits, doc, output_directory):
     for party_name, ranges in splits.items():
-        new_pdf = fitz.open()
+        new_pdf = pymupdf.open()
         for start_page, end_page in ranges:
-            for i in range(start_page, end_page + 1):
-                new_pdf.insert_pdf(doc, from_page=i, to_page=i)
+            new_pdf.insert_pdf(doc, from_page=start_page, to_page=end_page)
         
         output_filename = f"{party_name}.pdf"
         output_path = os.path.join(output_directory, output_filename)

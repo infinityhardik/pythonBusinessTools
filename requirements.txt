@@ -1,0 +1,6 @@
+# Python 3.14.x runtime dependencies for pythonBusinessTools
+# Do NOT install the unrelated PyPI package named "fitz".
+PyMuPDF>=1.28.2,<1.29
+PyQt6>=6.11.0,<6.12
+Pillow>=12.3.0,<13
+pytesseract>=0.3.13,<0.4

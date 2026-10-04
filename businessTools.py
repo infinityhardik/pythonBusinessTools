@@ -20,8 +20,8 @@ import os
 import re
 import io
 
-import fitz  # PyMuPDF for PDF processing
-from PyQt5.QtWidgets import (
+import pymupdf
+from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
     QVBoxLayout,
@@ -36,8 +36,6 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QGroupBox,
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
 from PIL import Image
 import pytesseract
 
@@ -94,27 +92,28 @@ def extract_order_id_dynamic(text, order_keyword="ID :", regex_pattern=r"ID :\s*
 
 def extract_text_from_pdf(pdf_path):
     """
-    Extracts text from a PDF. Uses direct text extraction if available;
-    otherwise, uses OCR on the rendered page image.
+    Extract text from a PDF, falling back to OCR for image-only pages.
+
+    Text is accumulated in a list rather than repeatedly concatenating strings,
+    which avoids unnecessary intermediate string allocations on larger PDFs.
     """
-    text = ""
+    text_chunks = []
     try:
-        doc = fitz.open(pdf_path)
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            page_text = page.get_text("text")
-            if page_text.strip():
-                text += page_text
-            else:
-                # Fallback to OCR if no text is extracted
+        with pymupdf.open(pdf_path) as doc:
+            for page in doc:
+                page_text = page.get_text("text")
+                if page_text.strip():
+                    text_chunks.append(page_text)
+                    continue
+
+                # Fallback to OCR if no text is embedded on the page.
                 pix = page.get_pixmap()
-                img = Image.open(io.BytesIO(pix.tobytes()))
-                ocr_text = pytesseract.image_to_string(img)
-                text += ocr_text
-        doc.close()
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+                text_chunks.append(pytesseract.image_to_string(img))
     except Exception as e:
-        text = f"Error processing {pdf_path}: {str(e)}"
-    return text
+        return f"Error processing {pdf_path}: {e}"
+
+    return "".join(text_chunks)
 
 
 def sanitize_filename(filename):
@@ -133,42 +132,40 @@ def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_off
     Splits the input PDF into segments based on the party name.
     Consecutive pages with the same party name are grouped together.
     """
-    doc = fitz.open(pdf_path)
-    num_pages = len(doc)
-    current_party = None
-    current_start_page = 0
-    splits = []  # List of tuples: (start_page, end_page, party_name)
+    with pymupdf.open(pdf_path) as doc:
+        num_pages = len(doc)
+        current_party = None
+        current_start_page = 0
+        splits = []  # List of tuples: (start_page, end_page, party_name)
 
-    for page_num in range(num_pages):
-        page = doc.load_page(page_num)
-        text = page.get_text("text")
-        extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
-        if extracted_party:
-            if current_party is None:
-                # Start a new grouping if none exists
-                current_party = extracted_party
-                current_start_page = page_num
-            elif extracted_party != current_party:
-                # Party has changed; finish the current group and start a new one.
-                splits.append((current_start_page, page_num - 1, current_party))
-                current_party = extracted_party
-                current_start_page = page_num
-            # If the extracted party equals current_party, continue grouping.
-        # If no party is found, assume the page is part of the current group (if any)
+        for page_num in range(num_pages):
+            page = doc.load_page(page_num)
+            text = page.get_text("text")
+            extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
+            if extracted_party:
+                if current_party is None:
+                    # Start a new grouping if none exists
+                    current_party = extracted_party
+                    current_start_page = page_num
+                elif extracted_party != current_party:
+                    # Party has changed; finish the current group and start a new one.
+                    splits.append((current_start_page, page_num - 1, current_party))
+                    current_party = extracted_party
+                    current_start_page = page_num
+                # If the extracted party equals current_party, continue grouping.
+            # If no party is found, assume the page is part of the current group (if any)
 
-    if current_party is not None:
-        splits.append((current_start_page, num_pages - 1, current_party))
+        if current_party is not None:
+            splits.append((current_start_page, num_pages - 1, current_party))
 
-    for start_page, end_page, party in splits:
-        new_pdf = fitz.open()
-        for i in range(start_page, end_page + 1):
-            new_pdf.insert_pdf(doc, from_page=i, to_page=i)
-        sanitized_party = sanitize_filename(party).strip()
-        output_filename = f"{sanitized_party}.pdf"
-        output_path = os.path.join(output_directory, output_filename)
-        new_pdf.save(output_path)
-        new_pdf.close()
-    doc.close()
+        for start_page, end_page, party in splits:
+            new_pdf = pymupdf.open()
+            new_pdf.insert_pdf(doc, from_page=start_page, to_page=end_page)
+            sanitized_party = sanitize_filename(party).strip()
+            output_filename = f"{sanitized_party}.pdf"
+            output_path = os.path.join(output_directory, output_filename)
+            new_pdf.save(output_path)
+            new_pdf.close()
     return f"Processed (Split by Party Name): {os.path.basename(pdf_path)}"
 
 
@@ -180,61 +177,56 @@ def extract_pdf_by_order_id(
     Consecutive pages with the same party and order ID are grouped together.
     If a page does not contain extraction info, it is assumed to belong to the current group.
     """
-    doc = fitz.open(pdf_path)
-    num_pages = len(doc)
-    current_party = None
-    current_order_id = None
-    current_start_page = 0
-    splits = []  # List of tuples: (start_page, end_page, party_name, order_id)
+    with pymupdf.open(pdf_path) as doc:
+        num_pages = len(doc)
+        current_party = None
+        current_order_id = None
+        current_start_page = 0
+        splits = []  # List of tuples: (start_page, end_page, party_name, order_id)
 
-    for page_num in range(num_pages):
-        page = doc.load_page(page_num)
-        text = page.get_text("text")
-        extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
-        extracted_order_id = extract_order_id_dynamic(text, order_keyword, order_regex)
+        for page_num in range(num_pages):
+            page = doc.load_page(page_num)
+            text = page.get_text("text")
+            extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
+            extracted_order_id = extract_order_id_dynamic(text, order_keyword, order_regex)
 
-        if extracted_party and extracted_order_id:
-            # If no group exists, start one.
-            if current_party is None:
-                current_party = extracted_party
-                current_order_id = extracted_order_id
-                current_start_page = page_num
-            # If either the party or order ID has changed, finish the current group.
-            elif (
-                extracted_party != current_party
-                or extracted_order_id != current_order_id
-            ):
-                splits.append(
-                    (current_start_page, page_num - 1, current_party, current_order_id)
-                )
-                current_party = extracted_party
-                current_order_id = extracted_order_id
-                current_start_page = page_num
-            # If both are the same, continue grouping.
-        else:
-            # If extraction fails on this page and a group has started, assume it belongs to the current group.
-            # Otherwise, skip the page.
-            if current_party is None:
+            if extracted_party and extracted_order_id:
+                # If no group exists, start one.
+                if current_party is None:
+                    current_party = extracted_party
+                    current_order_id = extracted_order_id
+                    current_start_page = page_num
+                # If either the party or order ID has changed, finish the current group.
+                elif (
+                    extracted_party != current_party
+                    or extracted_order_id != current_order_id
+                ):
+                    splits.append(
+                        (current_start_page, page_num - 1, current_party, current_order_id)
+                    )
+                    current_party = extracted_party
+                    current_order_id = extracted_order_id
+                    current_start_page = page_num
+                # If both are the same, continue grouping.
+            elif current_party is None:
+                # Otherwise, skip leading pages until the first complete group is found.
                 continue
 
-    # Add the final group if one exists.
-    if current_party is not None:
-        splits.append(
-            (current_start_page, num_pages - 1, current_party, current_order_id)
-        )
+        # Add the final group if one exists.
+        if current_party is not None:
+            splits.append(
+                (current_start_page, num_pages - 1, current_party, current_order_id)
+            )
 
-    # Save each group as a new PDF.
-    for start_page, end_page, party, order_id in splits:
-        new_pdf = fitz.open()
-        for i in range(start_page, end_page + 1):
-            new_pdf.insert_pdf(doc, from_page=i, to_page=i)
-        combined_name = sanitize_filename(f"{party}_{order_id}")
-        output_filename = f"{combined_name}.pdf"
-        output_path = os.path.join(output_directory, output_filename)
-        new_pdf.save(output_path)
-        new_pdf.close()
-
-    doc.close()
+        # Save each group as a new PDF. Copy the full page range in one call.
+        for start_page, end_page, party, order_id in splits:
+            new_pdf = pymupdf.open()
+            new_pdf.insert_pdf(doc, from_page=start_page, to_page=end_page)
+            combined_name = sanitize_filename(f"{party}_{order_id}")
+            output_filename = f"{combined_name}.pdf"
+            output_path = os.path.join(output_directory, output_filename)
+            new_pdf.save(output_path)
+            new_pdf.close()
     return f"Processed (Extract by Order ID): {os.path.basename(pdf_path)}"
 
 
@@ -640,4 +632,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = BusinessToolsUI()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

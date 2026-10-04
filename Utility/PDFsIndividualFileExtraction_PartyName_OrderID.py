@@ -1,6 +1,6 @@
 # Individual File Extraction based on Order ID and Party Name
 import os
-import fitz  # PyMuPDF
+import pymupdf
 import re
 
 def sanitize_name(filename):
@@ -35,7 +35,7 @@ def extract_party_name_and_order_id(text):
     return None
 
 def demerge_and_rename_pdf(pdf_path, output_directory):
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     num_pages = len(doc)
     
     current_party_name = None
@@ -60,9 +60,8 @@ def demerge_and_rename_pdf(pdf_path, output_directory):
 
     # Split and rename the files
     for start_page, end_page, party_name in splits:
-        new_pdf = fitz.open()
-        for i in range(start_page, end_page + 1):
-            new_pdf.insert_pdf(doc, from_page=i, to_page=i)
+        new_pdf = pymupdf.open()
+        new_pdf.insert_pdf(doc, from_page=start_page, to_page=end_page)
         
         output_filename = f"{party_name}.pdf"
         output_path = os.path.join(output_directory, output_filename)
