@@ -58,35 +58,62 @@ def extract_party_name_dynamic(text, party_keyword="M/s.", offset=-1):
     return party_name
 
 
-def extract_order_id_dynamic(text, order_keyword="ID :", regex_pattern=r"ID :\s*(\d+)"):
+def extract_order_id_dynamic(text, order_keyword="ID :", regex_pattern=r"ID\s*:\s*(?:\n\s*Date\s*:[^\n]*)?\s*\n\s*([A-Za-z0-9][A-Za-z0-9._/-]*)"):
     """
-    Extracts the order ID dynamically.
-    This function first checks the line that contains the order keyword.
-    If a numeric order ID is not found on that line, it will check the next line.
+    Extracts an order ID using the configured keyword and regex.
+
+    Some source PDFs place the identifier on the line after the ID label and
+    put a Date line between the label and identifier, for example::
+
+        ID :
+        Date : 02/10/2026
+        R/349
+
+    The supplied regex is therefore matched against the complete page text,
+    including newlines. A small line-based fallback is retained for custom
+    profiles whose regex targets only a same-line or nearby value.
     """
+    try:
+        match = re.search(regex_pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                return value
+    except (re.error, IndexError):
+        # A user-configured regex may be invalid or may not contain a capture
+        # group. Fall back to the line-based logic below rather than breaking
+        # the whole PDF operation.
+        pass
+
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        if order_keyword in line:
-            # Try to extract number from the same line
-            match = re.search(regex_pattern, line)
+        if order_keyword.lower() not in line.lower():
+            continue
+
+        # Try the configured regex against the keyword line first.
+        try:
+            match = re.search(regex_pattern, line, flags=re.IGNORECASE)
             if match:
-                return match.group(1)
-            # Otherwise, check the next non-empty line for a numeric value.
-            j = i + 1
-            while j < len(lines):
-                candidate = lines[j].strip()
-                # Skip if the candidate is just a colon or similar punctuation.
-                if candidate == ":":
-                    j += 1
-                    continue
-                if candidate:
-                    if candidate.isdigit():
-                        return candidate
-                    match = re.search(r"(\d+)", candidate)
-                    if match:
-                        return match.group(1)
-                    break
-                j += 1
+                value = match.group(1).strip()
+                if value:
+                    return value
+        except (re.error, IndexError):
+            pass
+
+        # Then inspect nearby non-empty lines. Skip common date labels so a
+        # date value is never mistaken for the order ID.
+        for j in range(i + 1, min(i + 8, len(lines))):
+            candidate = lines[j].strip()
+            if not candidate or candidate == ":":
+                continue
+            if re.match(r"^Date\s*:", candidate, flags=re.IGNORECASE):
+                continue
+
+            # Prefer a complete order-ID token such as R/349, R-349 or 349.
+            token = re.search(r"\b[A-Za-z]+\s*[/_-]\s*\d+\b|\b\d+\b", candidate)
+            if token:
+                return re.sub(r"\s+", "", token.group(0))
+
     return None
 
 
@@ -127,45 +154,89 @@ def sanitize_filename(filename):
 # ----------------------- PDF Processing Functions -----------------------
 
 
+def _group_page_numbers_by_key(doc, party_keyword, party_offset, order_keyword=None, order_regex=None):
+    """Collect pages by their extracted party or party/order key.
+
+    Pages are grouped globally rather than only when the same key appears on
+    consecutive pages. This prevents a repeated party later in the document
+    from overwriting an earlier output file.
+    """
+    groups = {}
+    last_key = None
+
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        text = page.get_text("text")
+        party = extract_party_name_dynamic(text, party_keyword, party_offset)
+
+        if order_keyword is None:
+            key = party
+        else:
+            order_id = extract_order_id_dynamic(text, order_keyword, order_regex)
+            key = (party, order_id) if party and order_id else None
+
+        if key is not None:
+            groups.setdefault(key, []).append(page_num)
+            last_key = key
+        elif last_key is not None:
+            # Preserve the existing behavior for continuation pages that do
+            # not repeat the identifying text.
+            groups.setdefault(last_key, []).append(page_num)
+
+    return groups
+
+
+def _insert_page_numbers(dest_doc, source_doc, page_numbers):
+    """Copy possibly non-contiguous source pages using contiguous ranges."""
+    if not page_numbers:
+        return
+
+    start = previous = page_numbers[0]
+    for page_num in page_numbers[1:]:
+        if page_num == previous + 1:
+            previous = page_num
+            continue
+
+        dest_doc.insert_pdf(source_doc, from_page=start, to_page=previous)
+        start = previous = page_num
+
+    dest_doc.insert_pdf(source_doc, from_page=start, to_page=previous)
+
+
+def _unique_output_path(output_directory, filename):
+    """Return a collision-free output path without overwriting another group."""
+    base, extension = os.path.splitext(filename)
+    candidate = os.path.join(output_directory, filename)
+    counter = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(output_directory, f"{base} ({counter}){extension}")
+        counter += 1
+    return candidate
+
+
 def split_pdf_by_party_name(pdf_path, output_directory, party_keyword, party_offset):
     """
-    Splits the input PDF into segments based on the party name.
-    Consecutive pages with the same party name are grouped together.
+    Splits the input PDF by party name.
+
+    All pages belonging to the same party are collected into one output PDF,
+    even when that party appears again later in the source document.
     """
     with pymupdf.open(pdf_path) as doc:
-        num_pages = len(doc)
-        current_party = None
-        current_start_page = 0
-        splits = []  # List of tuples: (start_page, end_page, party_name)
+        groups = _group_page_numbers_by_key(
+            doc, party_keyword, party_offset
+        )
 
-        for page_num in range(num_pages):
-            page = doc.load_page(page_num)
-            text = page.get_text("text")
-            extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
-            if extracted_party:
-                if current_party is None:
-                    # Start a new grouping if none exists
-                    current_party = extracted_party
-                    current_start_page = page_num
-                elif extracted_party != current_party:
-                    # Party has changed; finish the current group and start a new one.
-                    splits.append((current_start_page, page_num - 1, current_party))
-                    current_party = extracted_party
-                    current_start_page = page_num
-                # If the extracted party equals current_party, continue grouping.
-            # If no party is found, assume the page is part of the current group (if any)
-
-        if current_party is not None:
-            splits.append((current_start_page, num_pages - 1, current_party))
-
-        for start_page, end_page, party in splits:
+        for party, page_numbers in groups.items():
+            if not party:
+                continue
             new_pdf = pymupdf.open()
-            new_pdf.insert_pdf(doc, from_page=start_page, to_page=end_page)
+            _insert_page_numbers(new_pdf, doc, page_numbers)
             sanitized_party = sanitize_filename(party).strip()
             output_filename = f"{sanitized_party}.pdf"
-            output_path = os.path.join(output_directory, output_filename)
+            output_path = _unique_output_path(output_directory, output_filename)
             new_pdf.save(output_path)
             new_pdf.close()
+
     return f"Processed (Split by Party Name): {os.path.basename(pdf_path)}"
 
 
@@ -173,60 +244,35 @@ def extract_pdf_by_order_id(
     pdf_path, output_directory, party_keyword, party_offset, order_keyword, order_regex
 ):
     """
-    Splits the PDF into segments based on both party name and order ID.
-    Consecutive pages with the same party and order ID are grouped together.
-    If a page does not contain extraction info, it is assumed to belong to the current group.
+    Splits the PDF into PDFs grouped by party name + order ID.
+
+    Repeated occurrences of the same party/order ID anywhere in the source are
+    combined into one output file, while different order IDs remain separate.
     """
     with pymupdf.open(pdf_path) as doc:
-        num_pages = len(doc)
-        current_party = None
-        current_order_id = None
-        current_start_page = 0
-        splits = []  # List of tuples: (start_page, end_page, party_name, order_id)
+        groups = _group_page_numbers_by_key(
+            doc,
+            party_keyword,
+            party_offset,
+            order_keyword,
+            order_regex,
+        )
 
-        for page_num in range(num_pages):
-            page = doc.load_page(page_num)
-            text = page.get_text("text")
-            extracted_party = extract_party_name_dynamic(text, party_keyword, party_offset)
-            extracted_order_id = extract_order_id_dynamic(text, order_keyword, order_regex)
-
-            if extracted_party and extracted_order_id:
-                # If no group exists, start one.
-                if current_party is None:
-                    current_party = extracted_party
-                    current_order_id = extracted_order_id
-                    current_start_page = page_num
-                # If either the party or order ID has changed, finish the current group.
-                elif (
-                    extracted_party != current_party
-                    or extracted_order_id != current_order_id
-                ):
-                    splits.append(
-                        (current_start_page, page_num - 1, current_party, current_order_id)
-                    )
-                    current_party = extracted_party
-                    current_order_id = extracted_order_id
-                    current_start_page = page_num
-                # If both are the same, continue grouping.
-            elif current_party is None:
-                # Otherwise, skip leading pages until the first complete group is found.
+        for key, page_numbers in groups.items():
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            party, order_id = key
+            if not party or not order_id:
                 continue
 
-        # Add the final group if one exists.
-        if current_party is not None:
-            splits.append(
-                (current_start_page, num_pages - 1, current_party, current_order_id)
-            )
-
-        # Save each group as a new PDF. Copy the full page range in one call.
-        for start_page, end_page, party, order_id in splits:
             new_pdf = pymupdf.open()
-            new_pdf.insert_pdf(doc, from_page=start_page, to_page=end_page)
+            _insert_page_numbers(new_pdf, doc, page_numbers)
             combined_name = sanitize_filename(f"{party}_{order_id}")
             output_filename = f"{combined_name}.pdf"
-            output_path = os.path.join(output_directory, output_filename)
+            output_path = _unique_output_path(output_directory, output_filename)
             new_pdf.save(output_path)
             new_pdf.close()
+
     return f"Processed (Extract by Order ID): {os.path.basename(pdf_path)}"
 
 
@@ -297,7 +343,7 @@ class BusinessToolsUI(QWidget):
         self.default_party_keyword = "M/s."
         self.default_party_offset = "-1"
         self.default_order_keyword = "ID :"
-        self.default_order_regex = r"ID :\s*(\d+)"
+        self.default_order_regex = r"ID\s*:\s*(?:\n\s*Date\s*:[^\n]*)?\s*\n\s*([A-Za-z0-9][A-Za-z0-9._/-]*)"
         # Invoice defaults for order extraction
         self.invoice_order_keyword = "Invoice No."
         self.invoice_order_regex = r"Invoice No\.\s*:\s*(\d+)"
